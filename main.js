@@ -1,16 +1,13 @@
 // WebGPU bindings in JavaScript
-const workgroupSize = 128;
-const numWorkgroups = 2;
-const BATCH_SIZE = 2;
+const workgroupSize = 256;
+const numWorkgroups = 8192;
+const BATCH_SIZE = 4;
 let deviceID = 0;
 let alt = 1;
 let checkResults = false;
 let vec_size;
 let debug_size = 2;
 let par_lookback = 1;
-let bindGroupLayout;
-
-let device, adapter;
 
 // Declare buffers globally (or at the top of your script)
 let ABuffer, BBuffer, CBuffer, CReadBuffer, DBuffer, debugBuffer;
@@ -32,39 +29,41 @@ async function loadShader(device, path) {
   return shaderModule;
 }
 
-async function initBindGroupLayout() {
-  bindGroupLayout = device.createBindGroupLayout({
+async function initBindGroupLayout(device) {
+  const bindGroupLayout = device.createBindGroupLayout({
     entries: [
       {
         binding: 0,
-        resource: { buffer: { type: 'storage' } },
         visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'storage' },
       },
       {
         binding: 1,
-        resource: { buffer: { type: 'storage' } },
         visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'storage' },
       },
       {
         binding: 2,
-        resource: { buffer: { type: 'storage' } },
         visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'storage' },
       },
       {
         binding: 3,
-        resource: { buffer: { type: 'storage' } },
         visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'storage' },
       },
       {
         binding: 4,
-        resource: { buffer: { type: 'storage' } },
         visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'storage' },
       },
     ],
   });
+
+  return bindGroupLayout;
 }
 
-async function initBindGroup() {
+async function initBindGroup(device, bindGroupLayout) {
   const entries = [];
 
   // AEntry
@@ -137,22 +136,17 @@ async function initBindGroup() {
     throw new Error("No valid entries in the bind group");
   }
 
+
   // BindGroupDescriptor
   const bindGroupDesc = {
     layout: bindGroupLayout,
     entries: entries,
   };
-
-  try {
-    const bindGroup = device.createBindGroup(bindGroupDesc);
-    return bindGroup;
-  } catch (error) {
-    console.error("Error creating bind group:", error);
-    throw error;
-  }
+  const bindGroup = device.createBindGroup(bindGroupDesc);
+  return bindGroup
 }
 
-async function initComputePipeline() {
+async function initComputePipeline(device, bindGroupLayout) {
   const shaderModule = await loadShader(device, 'prefix-sum.wgsl');
 
   if (!Number.isFinite(workgroupSize)) {
@@ -171,59 +165,67 @@ async function initComputePipeline() {
       },
     },
   });
-
-  return pipeline;
+  return pipeline
 }
 
-async function initBuffers() {
+async function initBuffers(device) {
   // Initialize buffers (no need to return them)
   ABuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: vec_size * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
   BBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: numWorkgroups * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
   CBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: vec_size * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
   });
 
   CReadBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: vec_size * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
 
   DBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
   debugBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: debug_size * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
   });
 
   debugReadBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: debug_size * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
 
   TimestampResolveBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: 2 * 8, // size of u_long
     usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
   });
 
   TimestampReadBuffer = device.createBuffer({
+    mappedAtCreation: false,
     size: 2 * 8, // size of u_long
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
 }
 
-async function run() {
+async function run(device, pipeline, bindGroup) {
   const queue = device.queue;
   //const { ABuffer, BBuffer, CBuffer, CReadBuffer, DBuffer, debugBuffer, debugReadBuffer, TimestampResolveBuffer, TimestampReadBuffer } = await initBuffers(device);
 
@@ -245,10 +247,10 @@ async function run() {
     beginningOfPassWriteIndex: 0,
     endOfPassWriteIndex: 1,
   };
-
+  const start = Date.now();
   const computePass = encoder.beginComputePass({ timestampWrites });
   computePass.setPipeline(pipeline);
-  computePass.setBindGroup(0, bindGroup, 0, []);
+  computePass.setBindGroup(0, bindGroup);
   computePass.dispatchWorkgroups(numWorkgroups, 1, 1);
   computePass.end();
 
@@ -266,12 +268,31 @@ async function run() {
 
   await debugReadBuffer.mapAsync(GPUMapMode.READ, 0, debug_size * 4);
   const debugOut = new Uint32Array(debugReadBuffer.getMappedRange());
-
+ 
   await TimestampReadBuffer.mapAsync(GPUMapMode.READ, 0, 2 * 8);
   const timestampOutput = new BigUint64Array(TimestampReadBuffer.getMappedRange());
+  duration = Date.now() - start;
+  if (output[vec_size - 1] == vec_size * alt) {
+    console.log("Succesful.")
+  }else{
+    console.log("There was an incorrect value.")
+  }
 
   const time = timestampOutput[1] - timestampOutput[0];
-  console.log('Execution Time: ', time);
+  console.log('Execution Time: ', time, 'ticks (ns)');
+  //console.log(typeof(time))
+  //console.log("Throughput: ", (vec_size * 4 * 2)/(time), " GBPS\n")
+
+  const timeInSeconds = Number(time) / 1e9; // Convert BigInt nanoseconds to seconds
+  const bytesTransferred = vec_size * 4 * 2; // Assuming 4 bytes per element, and 2 passes
+  const gigabytesTransferred = bytesTransferred / 1e9; // Convert bytes to gigabytes                                                 
+
+  const throughput = gigabytesTransferred / timeInSeconds
+
+  console.log("Date.now duration: ", duration, "ns?")
+  //console.log("Throughput: ", throughput.toFixed(5), " GBPS");
+  console.log("Throughput: ", throughput, " GBPS");
+
 
   if (checkResults) {
     for (let i = 1; i < vec_size; i++) {
@@ -283,6 +304,7 @@ async function run() {
 
 async function main() {
   vec_size = numWorkgroups * workgroupSize * BATCH_SIZE * 4;
+  const requiredFeatures = ["timestamp-query", "subgroup"];
 
   // Check if WebGPU is available in the browser
   if (!navigator.gpu) {
@@ -291,9 +313,8 @@ async function main() {
   }
 
   // Request a high-performance adapter and enable the required features
-  adapter = await navigator.gpu.requestAdapter({
+  const adapter = await navigator.gpu.requestAdapter({
     powerPreference: 'high-performance',
-    features: ['timestamp-query', 'subgroup'],  // Enable specific features
   });
 
   if (!adapter) {
@@ -301,25 +322,27 @@ async function main() {
     return;
   }
 
-  // Log adapter details
-  console.log(`Adapter Name: ${adapter.name}`);
-  console.log(`Adapter Vendor: ${adapter.vendor}`);
-  console.log(`Adapter Description: ${adapter.description}`);
+//   // Log adapter details
+//   console.log(`Adapter Name: ${adapter.name}`);
+//   console.log(`Adapter Vendor: ${adapter.vendor}`);
+//   console.log(`Adapter Description: ${adapter.description}`);
 
 
-  console.log("Adapter Name:", adapter.name || "Unknown");
-console.log("Adapter Vendor:", adapter.vendor || "Unknown");
-console.log("Adapter Description:", adapter.description || "Unknown");
+//   console.log("Adapter Name:", adapter.name || "Unknown");
+// console.log("Adapter Vendor:", adapter.vendor || "Unknown");
+// console.log("Adapter Description:", adapter.description || "Unknown");
 
-// Log other potentially useful information
-console.log("Adapter Limits:", adapter.limits);
-console.log("Is Fallback Adapter:", adapter.isFallbackAdapter);
+// // Log other potentially useful information
+// console.log("Adapter Limits:", adapter.limits);
+// console.log("Is Fallback Adapter:", adapter.isFallbackAdapter);
 
   // Request the device from the adapter
-  device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({
+    requiredFeatures: ["timestamp-query", "subgroups"],
+});
   device.lost.then(info => {
     console.error("Device lost:", info.message);
-  });
+  }); 
 
   // Check if 'timestamp-query' and 'subgroup' are supported
   if (adapter.features.has('timestamp-query')) {
@@ -328,7 +351,7 @@ console.log("Is Fallback Adapter:", adapter.isFallbackAdapter);
     console.log('Timestamp queries are not supported on this device.');
   }
 
-  if (adapter.features.has('subgroup')) {
+  if (adapter.features.has('subgroups')) {
     console.log('Subgroup operations are supported');
   } else {
     console.log('Subgroup operations are not supported on this device.');
@@ -340,13 +363,12 @@ console.log("Is Fallback Adapter:", adapter.isFallbackAdapter);
   };
 
   // Initialize all WebGPU components
-  await initBindGroupLayout();
-  await initBuffers();
-  await initComputePipeline();
-  await initBindGroup();
-
+  const bindGroupLayout = await initBindGroupLayout(device);
+  await initBuffers(device);
+  const bindGroup = await initBindGroup(device, bindGroupLayout);
+  const pipeline = await initComputePipeline(device, bindGroupLayout);
   // Run the compute pass (dispatching the work to the GPU)
-  await run(device);
+  await run(device, pipeline, bindGroup);
 }
 
 main();
