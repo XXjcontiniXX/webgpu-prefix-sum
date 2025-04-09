@@ -1,7 +1,7 @@
 // WebGPU bindings in JavaScript
 const workgroupSize = 256;
-const numWorkgroups = 8192;
-const BATCH_SIZE = 4;
+const numWorkgroups = 32768;
+const BATCH_SIZE = 1;
 let deviceID = 0;
 let alt = 1;
 let checkResults = false;
@@ -292,6 +292,8 @@ async function run(device, pipeline, bindGroup) {
   console.log("Date.now duration: ", duration, "ns?")
   //console.log("Throughput: ", throughput.toFixed(5), " GBPS");
   console.log("Throughput: ", throughput, " GBPS");
+  
+  document.getElementById("throughput-display").innerText = `Throughput: ${throughput} GBPS`;
 
 
   if (checkResults) {
@@ -308,9 +310,14 @@ async function main() {
 
   // Check if WebGPU is available in the browser
   if (!navigator.gpu) {
+    document.getElementById("webgpu-suppported").innerText = `WebGPU support: not supported`;
     console.error("WebGPU not supported in this browser.");
     return;
+  }else{
+    document.getElementById("webgpu-suppported").innerText = `WebGPU support: supported`;
   }
+
+  
 
   // Request a high-performance adapter and enable the required features
   const adapter = await navigator.gpu.requestAdapter({
