@@ -305,6 +305,7 @@ async function run(device, pipeline, bindGroup) {
 
 
 async function main() {
+  //await new Promise(r => setTimeout(r, 200000));
   vec_size = numWorkgroups * workgroupSize * BATCH_SIZE * 4;
   const requiredFeatures = ["timestamp-query", "subgroup"];
 
