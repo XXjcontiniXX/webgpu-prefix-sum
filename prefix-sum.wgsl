@@ -4,7 +4,6 @@
 @group(0) @binding(3) var<storage, read_write> part: atomic<u32>;
 @group(0) @binding(4) var<storage, read_write> debug: array<u32>;
 
-const BATCH_SIZE = 4;
 const FLG_A = 1;
 const FLG_P = 2;
 const ANTI_MASK = 30u;
@@ -50,6 +49,8 @@ fn calc_lookback_id(
   let my_id = part_id * wg_size * BATCH_SIZE + local_id.x * BATCH_SIZE;
 
   var values: array<vec4<u32>, BATCH_SIZE>;
+
+  //{VEC4-REDUCTION}
 
   for (var i: u32 = 0; i < BATCH_SIZE; i++) {
       values[i] = in[my_id + i];

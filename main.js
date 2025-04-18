@@ -1,31 +1,48 @@
 // WebGPU bindings in JavaScript
-const workgroupSize = 256;
-const numWorkgroups = 32768;
-const BATCH_SIZE = 1;
 let deviceID = 0;
-let alt = 1;
-let checkResults = false;
-let vec_size;
-let debug_size = 2;
-let par_lookback = 1;
+let checkResults = true;
 
-// Declare buffers globally (or at the top of your script)
-let ABuffer, BBuffer, CBuffer, CReadBuffer, DBuffer, debugBuffer;
-let debugReadBuffer, TimestampResolveBuffer, TimestampReadBuffer;
+
+
+//const THREADS = [32, 64, 128, 256]
+
+//const THREADS = [64, 128, 256]
+const THREADS = [128]
+//const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+const WORKGROUPS = [128]
+//const BATCH_SIZES = [1, 2, 4]
+const BATCH_SIZES = [2]
+//const PAR_LOOKBACK = [1, 0]
+const PAR_LOOKBACK = [1]
+const VEC_SIZES = {
+  [1 << 10]: [], [1 << 11]: [], [1 << 12]: [],
+  [1 << 13]: [], [1 << 14]: [], [1 << 15]: [],
+  [1 << 16]: [], [1 << 17]: [], [1 << 18]: [],
+  [1 << 19]: [], [1 << 20]: [], [1 << 21]: [],
+  [1 << 22]: [], [1 << 23]: [], [1 << 24]: [],
+  [1 << 25]: []
+};
+const PER_THREAD_SIZE = 4;
+
+
+
+
+
 
 async function deviceLostCallback(reason, message) {
   console.log(`Device lost: reason ${reason}`);
   if (message) console.log(` (message: ${message})`);
 }
 
-async function loadShader(device, path) {
+async function loadShader(device, path, TUNING_CONFIG) {
   const response = await fetch(path);
-  const shaderSource = await response.text();
+  let shaderSource = await response.text();
+  let fullShaderSource =  `enable subgroups;\ndiagnostic(off, subgroup_uniformity);\nconst BATCH_SIZE = ${TUNING_CONFIG.batch_size};\n` + shaderSource;
 
-  let fullShaderSource = `enable subgroups;\ndiagnostic(off, subgroup_uniformity);\n`;
-  fullShaderSource += shaderSource.replace("const BATCH_SIZE = 4;", `const BATCH_SIZE = ${BATCH_SIZE};`);
+  //fullShaderSource += shaderSource.replace("const BATCH_SIZE = 4;", `const BATCH_SIZE = ${BATCH_SIZE};`);
 
   const shaderModule = device.createShaderModule({ code: fullShaderSource });
+  //console.log(fullShaderSource);
   return shaderModule;
 }
 
@@ -63,15 +80,16 @@ async function initBindGroupLayout(device) {
   return bindGroupLayout;
 }
 
-async function initBindGroup(device, bindGroupLayout) {
+async function initBindGroup(device, bindGroupLayout, TUNING_CONFIG, buffers) {
   const entries = [];
+  const vec_size = TUNING_CONFIG.numWorkgroups * TUNING_CONFIG.workgroupSize * TUNING_CONFIG.batch_size * PER_THREAD_SIZE;
 
   // AEntry
-  if (ABuffer) {
+  if (buffers.ABuffer) {
     const AEntry = {
       binding: 0,
       resource: {
-        buffer: ABuffer,
+        buffer: buffers.ABuffer,
         offset: 0,
         size: vec_size * 4, // 4 bytes per int
       },
@@ -80,24 +98,24 @@ async function initBindGroup(device, bindGroupLayout) {
   }
 
   // BEntry
-  if (BBuffer) {
+  if (buffers.BBuffer) {
     const BEntry = {
       binding: 1,
       resource: {
-        buffer: BBuffer,
+        buffer: buffers.BBuffer,
         offset: 0,
-        size: numWorkgroups * 4, // 4 bytes per int
+        size: TUNING_CONFIG.numWorkgroups * 4, // 4 bytes per int
       },
     };
     entries.push(BEntry);
   }
 
   // CEntry
-  if (CBuffer) {
+  if (buffers.CBuffer) {
     const CEntry = {
       binding: 2,
       resource: {
-        buffer: CBuffer,
+        buffer: buffers.CBuffer,
         offset: 0,
         size: vec_size * 4, // 4 bytes per int
       },
@@ -106,11 +124,11 @@ async function initBindGroup(device, bindGroupLayout) {
   }
 
   // DEntry
-  if (DBuffer) {
+  if (buffers.DBuffer) {
     const DEntry = {
       binding: 3,
       resource: {
-        buffer: DBuffer,
+        buffer: buffers.DBuffer,
         offset: 0,
         size: 4, // 4 bytes per int
       },
@@ -119,13 +137,13 @@ async function initBindGroup(device, bindGroupLayout) {
   }
 
   // DebugEntry
-  if (debugBuffer) {
+  if (buffers.debugBuffer) {
     const debugEntry = {
       binding: 4,
       resource: {
-        buffer: debugBuffer,
+        buffer: buffers.debugBuffer,
         offset: 0,
-        size: 4 * debug_size, // 4 bytes per int
+        size: 4 * TUNING_CONFIG.debug_size, // 4 bytes per int
       },
     };
     entries.push(debugEntry);
@@ -146,11 +164,11 @@ async function initBindGroup(device, bindGroupLayout) {
   return bindGroup
 }
 
-async function initComputePipeline(device, bindGroupLayout) {
-  const shaderModule = await loadShader(device, 'prefix-sum.wgsl');
+async function initComputePipeline(device, bindGroupLayout, TUNING_CONFIG) {
+  const shaderModule = await loadShader(device, 'prefix-sum.wgsl', TUNING_CONFIG);
 
-  if (!Number.isFinite(workgroupSize)) {
-    throw new Error(`Invalid workgroupSize: ${workgroupSize}`);
+  if (!Number.isFinite(TUNING_CONFIG.workgroupSize)) {
+    throw new Error(`Invalid workgroupSize: ${TUNING_CONFIG.workgroupSize}`);
   }
 
   const pipeline = device.createComputePipeline({
@@ -161,83 +179,101 @@ async function initComputePipeline(device, bindGroupLayout) {
       module: shaderModule,
       entryPoint: 'prefix_sum',
       constants: {
-        wg_size: workgroupSize,
+        wg_size: TUNING_CONFIG.workgroupSize,
       },
     },
   });
   return pipeline
 }
 
-async function initBuffers(device) {
-  // Initialize buffers (no need to return them)
-  ABuffer = device.createBuffer({
+async function initBuffers(device, TUNING_CONFIG) {
+  const vec_size = TUNING_CONFIG.numWorkgroups * TUNING_CONFIG.workgroupSize * TUNING_CONFIG.batch_size * PER_THREAD_SIZE;
+  console.log("size: ", vec_size);
+
+  const ABuffer = device.createBuffer({
     mappedAtCreation: false,
     size: vec_size * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
-  BBuffer = device.createBuffer({
+  const BBuffer = device.createBuffer({
     mappedAtCreation: false,
-    size: numWorkgroups * 4,
+    size: TUNING_CONFIG.numWorkgroups * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
-  CBuffer = device.createBuffer({
+  const CBuffer = device.createBuffer({
     mappedAtCreation: false,
     size: vec_size * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
   });
 
-  CReadBuffer = device.createBuffer({
+  const CReadBuffer = device.createBuffer({
     mappedAtCreation: false,
     size: vec_size * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
 
-  DBuffer = device.createBuffer({
+  const DBuffer = device.createBuffer({
     mappedAtCreation: false,
     size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
-  debugBuffer = device.createBuffer({
+  const debugBuffer = device.createBuffer({
     mappedAtCreation: false,
-    size: debug_size * 4,
+    size: TUNING_CONFIG.debug_size * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
   });
 
-  debugReadBuffer = device.createBuffer({
+  const debugReadBuffer = device.createBuffer({
     mappedAtCreation: false,
-    size: debug_size * 4,
+    size: TUNING_CONFIG.debug_size * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
 
-  TimestampResolveBuffer = device.createBuffer({
+  const TimestampResolveBuffer = device.createBuffer({
     mappedAtCreation: false,
-    size: 2 * 8, // size of u_long
+    size: 2 * 8,
     usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
   });
 
-  TimestampReadBuffer = device.createBuffer({
+  const TimestampReadBuffer = device.createBuffer({
     mappedAtCreation: false,
-    size: 2 * 8, // size of u_long
+    size: 2 * 8,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
+
+  return {
+    ABuffer,
+    BBuffer,
+    CBuffer,
+    CReadBuffer,
+    DBuffer,
+    debugBuffer,
+    debugReadBuffer,
+    TimestampResolveBuffer,
+    TimestampReadBuffer,
+  };
 }
 
-async function run(device, pipeline, bindGroup) {
+async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
+  const vec_size = TUNING_CONFIG.numWorkgroups * TUNING_CONFIG.workgroupSize * TUNING_CONFIG.batch_size * PER_THREAD_SIZE;
+  console.log("workgroups: ", TUNING_CONFIG.numWorkgroups)
+  console.log("threads: ", TUNING_CONFIG.workgroupSize)
+  console.log("batch_size: ", TUNING_CONFIG.batch_size)
   const queue = device.queue;
-  //const { ABuffer, BBuffer, CBuffer, CReadBuffer, DBuffer, debugBuffer, debugReadBuffer, TimestampResolveBuffer, TimestampReadBuffer } = await initBuffers(device);
+  //const { buffers.ABuffer, buffers.BBuffer, buffers.CBuffer, buffers.CReadBuffer, buffers.DBuffer, buffers.debugBuffer, buffers.debugReadBuffer, buffers.TimestampResolveBuffer, buffers.TimestampReadBuffer } = await initBuffers(device);
 
-  const A_host = Array(vec_size).fill(alt);
-  const B_host = Array(numWorkgroups).fill(0);
+  const A_host = Array(vec_size).fill(TUNING_CONFIG.alt);
+  const B_host = Array(TUNING_CONFIG.numWorkgroups).fill(0);
   const D_host = [0];
-  const debug_host = [par_lookback, 0];
+  const debug_host = [TUNING_CONFIG.par_lookback, 0];
 
-  queue.writeBuffer(ABuffer, 0, new Uint32Array(A_host));
-  queue.writeBuffer(BBuffer, 0, new Uint32Array(B_host));
-  queue.writeBuffer(DBuffer, 0, new Uint32Array(D_host));
-  queue.writeBuffer(debugBuffer, 0, new Uint32Array(debug_host));
+  queue.writeBuffer(buffers.ABuffer, 0, new Uint32Array(A_host));
+  queue.writeBuffer(buffers.BBuffer, 0, new Uint32Array(B_host));
+  queue.writeBuffer(buffers.DBuffer, 0, new Uint32Array(D_host));
+  queue.writeBuffer(buffers.debugBuffer, 0, new Uint32Array(debug_host));
 
   const encoder = device.createCommandEncoder();
 
@@ -251,31 +287,33 @@ async function run(device, pipeline, bindGroup) {
   const computePass = encoder.beginComputePass({ timestampWrites });
   computePass.setPipeline(pipeline);
   computePass.setBindGroup(0, bindGroup);
-  computePass.dispatchWorkgroups(numWorkgroups, 1, 1);
+  computePass.dispatchWorkgroups(TUNING_CONFIG.numWorkgroups, 1, 1);
   computePass.end();
 
-  encoder.copyBufferToBuffer(CBuffer, 0, CReadBuffer, 0, vec_size * 4);
-  encoder.copyBufferToBuffer(debugBuffer, 0, debugReadBuffer, 0, debug_size * 4);
-  encoder.resolveQuerySet(querySet, 0, 2, TimestampResolveBuffer, 0);
-  encoder.copyBufferToBuffer(TimestampResolveBuffer, 0, TimestampReadBuffer, 0, 2 * 8);
+  encoder.copyBufferToBuffer(buffers.CBuffer, 0, buffers.CReadBuffer, 0, vec_size * 4);
+  encoder.copyBufferToBuffer(buffers.debugBuffer, 0, buffers.debugReadBuffer, 0, TUNING_CONFIG.debug_size * 4);
+  encoder.resolveQuerySet(querySet, 0, 2, buffers.TimestampResolveBuffer, 0);
+  encoder.copyBufferToBuffer(buffers.TimestampResolveBuffer, 0, buffers.TimestampReadBuffer, 0, 2 * 8);
   
   const computeCommands = encoder.finish();
   queue.submit([computeCommands]);
 
   // Wait for the results
-  await CReadBuffer.mapAsync(GPUMapMode.READ, 0, vec_size * 4);
-  const output = new Uint32Array(CReadBuffer.getMappedRange());
+  await buffers.CReadBuffer.mapAsync(GPUMapMode.READ, 0, vec_size * 4);
+  const output = new Uint32Array(buffers.CReadBuffer.getMappedRange());
 
-  await debugReadBuffer.mapAsync(GPUMapMode.READ, 0, debug_size * 4);
-  const debugOut = new Uint32Array(debugReadBuffer.getMappedRange());
+  await buffers.debugReadBuffer.mapAsync(GPUMapMode.READ, 0, TUNING_CONFIG.debug_size * 4);
+  const debugOut = new Uint32Array(buffers.debugReadBuffer.getMappedRange());
  
-  await TimestampReadBuffer.mapAsync(GPUMapMode.READ, 0, 2 * 8);
-  const timestampOutput = new BigUint64Array(TimestampReadBuffer.getMappedRange());
+  await buffers.TimestampReadBuffer.mapAsync(GPUMapMode.READ, 0, 2 * 8);
+  const timestampOutput = new BigUint64Array(buffers.TimestampReadBuffer.getMappedRange());
   duration = Date.now() - start;
-  if (output[vec_size - 1] == vec_size * alt) {
+  let incorrect = 0;
+  if (output[vec_size - 1] == vec_size * TUNING_CONFIG.alt) {
     console.log("Succesful.")
   }else{
-    console.log("There was an incorrect value.")
+    incorrect = 1;
+    console.log("There was an incorrect value(s).")
   }
 
   const time = timestampOutput[1] - timestampOutput[0];
@@ -301,13 +339,58 @@ async function run(device, pipeline, bindGroup) {
       console.log(`output[${i - 1}]: ${output[i - 1]}`);
     }
   }
+  return [throughput, incorrect];
 }
 
 
+
 async function main() {
-  //await new Promise(r => setTimeout(r, 200000));
-  vec_size = numWorkgroups * workgroupSize * BATCH_SIZE * 4;
-  const requiredFeatures = ["timestamp-query", "subgroup"];
+
+  const ITERS = 1;
+  const WARM_UPS = 0;
+  
+  for (let i = 0; i < THREADS.length; i++) {
+    for (let j = 0; j < WORKGROUPS.length; j++) {
+      for (let k = 0; k < BATCH_SIZES.length; k++) {
+        let size = THREADS[i] * WORKGROUPS[j] * BATCH_SIZES[k] * PER_THREAD_SIZE;
+        if (size > 1 << 25) {
+          continue;
+        }
+        for (let l = 0; l < PAR_LOOKBACK.length; l++) {
+          let throughput, incorrect = 0;
+          console.log("vec_size: ", size)
+          for (let p = 1; p <= ITERS + WARM_UPS; p++) { // iters PLUS warmups to get warmups
+              if (p >= WARM_UPS) {
+                // througput, threads, workgroups, batch_size, par_lookback
+                const [t, inc] = await main_helper(THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], p);
+                throughput += t;
+                incorrect += inc;
+                console.log("throughput: ", t, " GBPS")
+              }else{
+                await main_helper(THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l])
+              }
+          }
+          VEC_SIZES[size].push(throughput / ITERS, THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], incorrect)
+        }
+      }
+    }
+  }
+  console.log(VEC_SIZES)
+}
+
+
+async function main_helper(thx, wkrgx, btchsx, plbkx, p) {
+
+  const TUNING_CONFIG = {
+    workgroupSize: thx,
+    numWorkgroups: wkrgx,
+    batch_size: btchsx,
+    par_lookback: plbkx,
+    alt: p,
+    debug_size: 2
+  };
+  
+  const requiredFeatures = ["timestamp-query", "subgroups"];
 
   // Check if WebGPU is available in the browser
   if (!navigator.gpu) {
@@ -346,7 +429,7 @@ async function main() {
 
   // Request the device from the adapter
   const device = await adapter.requestDevice({
-    requiredFeatures: ["timestamp-query", "subgroups"],
+    requiredFeatures: requiredFeatures,
 });
   device.lost.then(info => {
     console.error("Device lost:", info.message);
@@ -371,12 +454,15 @@ async function main() {
   };
 
   // Initialize all WebGPU components
-  const bindGroupLayout = await initBindGroupLayout(device);
-  await initBuffers(device);
-  const bindGroup = await initBindGroup(device, bindGroupLayout);
-  const pipeline = await initComputePipeline(device, bindGroupLayout);
+  const bindGroupLayout = await initBindGroupLayout(device, TUNING_CONFIG);
+  const buffers = await initBuffers(device, TUNING_CONFIG);
+  const bindGroup = await initBindGroup(device, bindGroupLayout, TUNING_CONFIG, buffers);
+  const pipeline = await initComputePipeline(device, bindGroupLayout, TUNING_CONFIG);
   // Run the compute pass (dispatching the work to the GPU)
-  await run(device, pipeline, bindGroup);
+  let [throughput, incorrect] = await run(device, pipeline, bindGroup, TUNING_CONFIG, buffers);
+  console.log("tp: ", throughput, "inc: ", incorrect)
+  return [throughput, incorrect];
 }
+
 
 main();
