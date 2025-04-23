@@ -6,18 +6,18 @@ let checkResults = false;
 
 //const THREADS = [32, 64, 128, 256]
 
-const THREADS = [64, 128, 256]
+// const THREADS = [32, 64, 128, 256]
 
-const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+// const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 
-const BATCH_SIZES = [1, 2, 4]
+// const BATCH_SIZES = [1, 2, 4]
 
-const PAR_LOOKBACK = [1, 0]
+// const PAR_LOOKBACK = [1, 0]
 
-//const THREADS = [128]
-//const WORKGROUPS = [128]
-//const BATCH_SIZES = [2]
-//const PAR_LOOKBACK = [1]
+const THREADS = [256]
+const WORKGROUPS = [8192]
+const BATCH_SIZES = [4]
+const PAR_LOOKBACK = [1]
 
 let VEC_SIZES = {
   [1 << 10]: [], [1 << 11]: [], [1 << 12]: [],
@@ -196,7 +196,7 @@ async function initComputePipeline(device, bindGroupLayout, TUNING_CONFIG) {
 
 async function initBuffers(device, TUNING_CONFIG) {
   const vec_size = TUNING_CONFIG.numWorkgroups * TUNING_CONFIG.workgroupSize * TUNING_CONFIG.batch_size * PER_THREAD_SIZE;
-  console.log("size: ", vec_size);
+  //console.log("size: ", vec_size);
 
   const ABuffer = device.createBuffer({
     mappedAtCreation: false,
@@ -292,7 +292,9 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
     endOfPassWriteIndex: 1,
   };
   const start = Date.now();
+
   const computePass = encoder.beginComputePass({ timestampWrites });
+  
   computePass.setPipeline(pipeline);
   computePass.setBindGroup(0, bindGroup);
   computePass.dispatchWorkgroups(TUNING_CONFIG.numWorkgroups, 1, 1);
@@ -303,18 +305,21 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
   encoder.resolveQuerySet(querySet, 0, 2, buffers.TimestampResolveBuffer, 0);
   encoder.copyBufferToBuffer(buffers.TimestampResolveBuffer, 0, buffers.TimestampReadBuffer, 0, 2 * 8);
   
+  
   const computeCommands = encoder.finish();
   queue.submit([computeCommands]);
-
   // Wait for the results
+  console.log("eat", "eat")
   await buffers.CReadBuffer.mapAsync(GPUMapMode.READ, 0, vec_size * 4);
+  console.log("ing")
   const output = new Uint32Array(buffers.CReadBuffer.getMappedRange());
-
+  
   await buffers.debugReadBuffer.mapAsync(GPUMapMode.READ, 0, TUNING_CONFIG.debug_size * 4);
   const debugOut = new Uint32Array(buffers.debugReadBuffer.getMappedRange());
- 
+  
   await buffers.TimestampReadBuffer.mapAsync(GPUMapMode.READ, 0, 2 * 8);
   const timestampOutput = new BigUint64Array(buffers.TimestampReadBuffer.getMappedRange());
+  
   duration = Date.now() - start;
   let incorrect = 0;
   if (output[vec_size - 1] == vec_size * TUNING_CONFIG.alt) {
@@ -338,7 +343,7 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
 
   //console.log("Date.now duration: ", duration, "ns?")
   //console.log("Throughput: ", throughput.toFixed(5), " GBPS");
-  //console.log("Throughput: ", throughput, " GBPS");
+  console.log("Throughput: ", throughput, " GBPS");
   
   document.getElementById("throughput-display").innerText = `Throughput: ${throughput} GBPS`;
 
@@ -372,15 +377,19 @@ async function main() {
           for (let p = 1; p <= ITERS + WARM_UPS; p++) { // iters PLUS warmups to get warmups
               if (p >= WARM_UPS) {
                 // througput, threads, workgroups, batch_size, par_lookback
+                //console.log("yomain")
                 const [t, inc] = await main_helper(THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], p);
+                //console.log("gurt")
                 throughput += t;
                 incorrect += inc;
-                //console.log("throughput: ", t, " GBPS")
+                
               }else{
+                //console.log("yohelper")
                 await main_helper(THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], p)
+                //console.log("gurt")
               }
           }
-          VEC_SIZES[size].push([throughput / ITERS, THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], incorrect])
+          VEC_SIZES[size].push([throughput / (ITERS + 1), THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], incorrect])
         }
       }
     }
@@ -469,6 +478,7 @@ async function main_helper(thx, wkrgx, btchsx, plbkx, p) {
   };
 
   // Initialize all WebGPU components
+  
   const bindGroupLayout = await initBindGroupLayout(device, TUNING_CONFIG);
   const buffers = await initBuffers(device, TUNING_CONFIG);
   const bindGroup = await initBindGroup(device, bindGroupLayout, TUNING_CONFIG, buffers);
