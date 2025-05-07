@@ -4,6 +4,7 @@
 // inputArgs: fill: make a fill type that fills with a single value
 // inputArgs: type: [u32, vec4...] need to be able iterable like sizes
 // validArgs: need to be able to match buffer type with certain memload code
+// tuningArgs: need an order in which to apply because some pieces have arguments in them as well that need to be interpolated at the end.
 
 
 // useful to enum everything then types are less ambiguous then I can write vec4/vec2 and have it mean 4 or 2, instead of just writing numbers for the types.
