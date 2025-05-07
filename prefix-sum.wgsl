@@ -13,6 +13,7 @@ override wg_size: u32;
 
 var<workgroup> wg_broadcast: u32;
 var<workgroup> exclusive_prefix: u32;
+var<workgroup> inclusive_scan: u32;
 var<workgroup> scratch: array<u32, wg_size>;
 
 
@@ -83,7 +84,63 @@ fn calc_lookback_id(
       for (var i = start; i < start + rake_batch_size; i++) {
           scratch[i] += prefix;
       }
-  }
+  // }
+  // let BLOCK_SIZE: u32 = wg_size;
+  // scratch[local_id.x] = values[BATCH_SIZE - 1].w;
+
+  // workgroupBarrier();
+
+  // // build the sum in place up the tree
+  // let ai: u32 = 2u * local_id.x + 1u;
+  // let bi: u32 = 2u * local_id.x + 2u;
+
+  // if (BLOCK_SIZE >= 2u) {
+  //   if (local_id.x < (BLOCK_SIZE >> 1u)) {
+  //     scratch[1u * bi - 1u] += scratch[1u * ai - 1u];
+  //   }
+
+  //   if ((BLOCK_SIZE >> 0u) > subgroup_size) {
+  //     workgroupBarrier();
+  //   }
+  // }
+  // if (BLOCK_SIZE >= 4u)  { if (local_id.x < (BLOCK_SIZE >> 2u))  { scratch[2u * bi - 1u] += scratch[2u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 8u)  { if (local_id.x < (BLOCK_SIZE >> 3u))  { scratch[4u * bi - 1u] += scratch[4u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 16u) { if (local_id.x < (BLOCK_SIZE >> 4u))  { scratch[8u * bi - 1u] += scratch[8u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 32u) { if (local_id.x < (BLOCK_SIZE >> 5u))  { scratch[16u * bi - 1u] += scratch[16u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 64u) { if (local_id.x < (BLOCK_SIZE >> 6u))  { scratch[32u * bi - 1u] += scratch[32u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 128u){ if (local_id.x < (BLOCK_SIZE >> 7u))  { scratch[64u * bi - 1u] += scratch[64u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 256u){ if (local_id.x < (BLOCK_SIZE >> 8u))  { scratch[128u * bi - 1u] += scratch[128u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 512u){ if (local_id.x < (BLOCK_SIZE >> 9u))  { scratch[256u * bi - 1u] += scratch[256u * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 1024u){if (local_id.x < (BLOCK_SIZE >> 10u)) { scratch[512u * bi - 1u] += scratch[512u * ai - 1u]; } workgroupBarrier(); }
+
+  // if (local_id.x == 0u) {
+  //   inclusive_scan = scratch[BLOCK_SIZE - 1u];
+  //   scratch[BLOCK_SIZE - 1u] = 0u;
+  // }
+  // workgroupBarrier();
+
+  // // traverse down the tree building the scan in place
+  // if (BLOCK_SIZE >= 2u) {
+  //   if (local_id.x < 1u) {
+  //     scratch[(BLOCK_SIZE >> 1u) * bi - 1u] += scratch[(BLOCK_SIZE >> 1u) * ai - 1u];
+  //     scratch[(BLOCK_SIZE >> 1u) * ai - 1u] = scratch[(BLOCK_SIZE >> 1u) * bi - 1u] - scratch[(BLOCK_SIZE >> 1u) * ai - 1u];
+  //   }
+  // }
+  // if (BLOCK_SIZE >= 4u)  { if (local_id.x < 2u)   { scratch[(BLOCK_SIZE >> 2u) * bi - 1u] += scratch[(BLOCK_SIZE >> 2u) * ai - 1u]; scratch[(BLOCK_SIZE >> 2u) * ai - 1u] = scratch[(BLOCK_SIZE >> 2u) * bi - 1u] - scratch[(BLOCK_SIZE >> 2u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 8u)  { if (local_id.x < 4u)   { scratch[(BLOCK_SIZE >> 3u) * bi - 1u] += scratch[(BLOCK_SIZE >> 3u) * ai - 1u]; scratch[(BLOCK_SIZE >> 3u) * ai - 1u] = scratch[(BLOCK_SIZE >> 3u) * bi - 1u] - scratch[(BLOCK_SIZE >> 3u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 16u) { if (local_id.x < 8u)   { scratch[(BLOCK_SIZE >> 4u) * bi - 1u] += scratch[(BLOCK_SIZE >> 4u) * ai - 1u]; scratch[(BLOCK_SIZE >> 4u) * ai - 1u] = scratch[(BLOCK_SIZE >> 4u) * bi - 1u] - scratch[(BLOCK_SIZE >> 4u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 32u) { if (local_id.x < 16u)  { scratch[(BLOCK_SIZE >> 5u) * bi - 1u] += scratch[(BLOCK_SIZE >> 5u) * ai - 1u]; scratch[(BLOCK_SIZE >> 5u) * ai - 1u] = scratch[(BLOCK_SIZE >> 5u) * bi - 1u] - scratch[(BLOCK_SIZE >> 5u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 64u) { if (local_id.x < 32u)  { scratch[(BLOCK_SIZE >> 6u) * bi - 1u] += scratch[(BLOCK_SIZE >> 6u) * ai - 1u]; scratch[(BLOCK_SIZE >> 6u) * ai - 1u] = scratch[(BLOCK_SIZE >> 6u) * bi - 1u] - scratch[(BLOCK_SIZE >> 6u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 128u){ if (local_id.x < 64u)  { scratch[(BLOCK_SIZE >> 7u) * bi - 1u] += scratch[(BLOCK_SIZE >> 7u) * ai - 1u]; scratch[(BLOCK_SIZE >> 7u) * ai - 1u] = scratch[(BLOCK_SIZE >> 7u) * bi - 1u] - scratch[(BLOCK_SIZE >> 7u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 256u){ if (local_id.x < 128u) { scratch[(BLOCK_SIZE >> 8u) * bi - 1u] += scratch[(BLOCK_SIZE >> 8u) * ai - 1u]; scratch[(BLOCK_SIZE >> 8u) * ai - 1u] = scratch[(BLOCK_SIZE >> 8u) * bi - 1u] - scratch[(BLOCK_SIZE >> 8u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 512u){ if (local_id.x < 256u) { scratch[(BLOCK_SIZE >> 9u) * bi - 1u] += scratch[(BLOCK_SIZE >> 9u) * ai - 1u]; scratch[(BLOCK_SIZE >> 9u) * ai - 1u] = scratch[(BLOCK_SIZE >> 9u) * bi - 1u] - scratch[(BLOCK_SIZE >> 9u) * ai - 1u]; } workgroupBarrier(); }
+  // if (BLOCK_SIZE >= 1024u){if (local_id.x < 512u){ scratch[(BLOCK_SIZE >> 10u) * bi - 1u] += scratch[(BLOCK_SIZE >> 10u) * ai - 1u]; scratch[(BLOCK_SIZE >> 10u) * ai - 1u] = scratch[(BLOCK_SIZE >> 10u) * bi - 1u] - scratch[(BLOCK_SIZE >> 10u) * ai - 1u]; } workgroupBarrier(); }
+
+  // let temp_tree: u32 = select(inclusive_scan, scratch[local_id.x + 1u], local_id.x != BLOCK_SIZE - 1u);
+
+  // workgroupBarrier();
+
+  // scratch[local_id.x] = temp_tree;
   
   workgroupBarrier();
 
@@ -184,10 +241,5 @@ fn calc_lookback_id(
   for (var i : u32 = 0; i < BATCH_SIZE; i++) {
     out[my_id + i] = values[i] + total_exclusive_prefix; 
   }
-
-
-              //   if (part_id == 2) {
-              //   debug[1] = 2;
-              // }
-
 }
+
