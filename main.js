@@ -278,10 +278,10 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
   const D_host = [0];
   const debug_host = [TUNING_CONFIG.par_lookback, 0];
 
-  queue.writeBuffer(buffers.ABuffer, 0, new Uint32Array(A_host));
-  queue.writeBuffer(buffers.BBuffer, 0, new Uint32Array(B_host));
-  queue.writeBuffer(buffers.DBuffer, 0, new Uint32Array(D_host));
-  queue.writeBuffer(buffers.debugBuffer, 0, new Uint32Array(debug_host));
+  await queue.writeBuffer(buffers.ABuffer, 0, new Uint32Array(A_host));
+  await queue.writeBuffer(buffers.BBuffer, 0, new Uint32Array(B_host));
+  await queue.writeBuffer(buffers.DBuffer, 0, new Uint32Array(D_host));
+  await queue.writeBuffer(buffers.debugBuffer, 0, new Uint32Array(debug_host));
 
   const encoder = device.createCommandEncoder();
 
@@ -309,9 +309,9 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
   const computeCommands = encoder.finish();
   queue.submit([computeCommands]);
   // Wait for the results
-  console.log("eat", "eat")
+  await device.queue.onSubmittedWorkDone();  // Make sure GPU has finished all tasks
+
   await buffers.CReadBuffer.mapAsync(GPUMapMode.READ, 0, vec_size * 4);
-  console.log("ing")
   const output = new Uint32Array(buffers.CReadBuffer.getMappedRange());
   
   await buffers.debugReadBuffer.mapAsync(GPUMapMode.READ, 0, TUNING_CONFIG.debug_size * 4);
