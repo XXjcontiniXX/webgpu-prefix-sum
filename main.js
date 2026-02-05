@@ -1,27 +1,22 @@
 // WebGPU bindings in JavaScript
-let deviceID = 0;
 let checkResults = false;
 
+// const THREADS = [32, 64, 128, 256];
+// const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+// const BATCH_SIZES = [1, 2, 4];
+// const PAR_LOOKBACK = [1, 0];
 
+const SHADERS = [
+  { name: "prefix-sum-new", path: "prefix-sum-new.wgsl" },
+  //{ name: "prefix-sum-og", path: "prefix-sum-og.wgsl" },
+];
 
-//const THREADS = [32, 64, 128, 256]
-
-// const THREADS = [32, 64, 128, 256]
-
-// const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-
-// const BATCH_SIZES = [1, 2, 4]
-
-// const PAR_LOOKBACK = [1, 0]
-
-const THREADS = [256]
-const WORKGROUPS = [8192]
-const BATCH_SIZES = [4]
-const PAR_LOOKBACK = [1]
+// const THREADS = [128]
+// const WORKGROUPS = [16384]
+// const BATCH_SIZES = [2]
+// const PAR_LOOKBACK = [0]
 
 let VEC_SIZES = {
-  [1 << 10]: [], [1 << 11]: [], [1 << 12]: [],
-  [1 << 13]: [], [1 << 14]: [], [1 << 15]: [],
   [1 << 16]: [], [1 << 17]: [], [1 << 18]: [],
   [1 << 19]: [], [1 << 20]: [], [1 << 21]: [],
   [1 << 22]: [], [1 << 23]: [], [1 << 24]: [],
@@ -45,7 +40,11 @@ async function deviceLostCallback(reason, message) {
 async function loadShader(device, path, TUNING_CONFIG) {
   const response = await fetch(path);
   let shaderSource = await response.text();
-  let fullShaderSource =  `enable subgroups;\ndiagnostic(off, subgroup_uniformity);\nconst BATCH_SIZE = ${TUNING_CONFIG.batch_size};\n` + shaderSource;
+
+  let num_subgroups = TUNING_CONFIG.workgroupSize / 32
+
+
+  let fullShaderSource =  `enable subgroups;\nrequires subgroup_id;\ndiagnostic(off, subgroup_uniformity);\nconst NUM_SUBGROUPS = ${num_subgroups};\nconst BATCH_SIZE = ${TUNING_CONFIG.batch_size};\n` + shaderSource;
 
   //fullShaderSource += shaderSource.replace("const BATCH_SIZE = 4;", `const BATCH_SIZE = ${BATCH_SIZE};`);
 
@@ -172,8 +171,8 @@ async function initBindGroup(device, bindGroupLayout, TUNING_CONFIG, buffers) {
   return bindGroup
 }
 
-async function initComputePipeline(device, bindGroupLayout, TUNING_CONFIG) {
-  const shaderModule = await loadShader(device, 'prefix-sum.wgsl', TUNING_CONFIG);
+async function initComputePipeline(device, bindGroupLayout, TUNING_CONFIG, shaderPath) {
+  const shaderModule = await loadShader(device, shaderPath, TUNING_CONFIG);
 
   if (!Number.isFinite(TUNING_CONFIG.workgroupSize)) {
     throw new Error(`Invalid workgroupSize: ${TUNING_CONFIG.workgroupSize}`);
@@ -326,6 +325,7 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
     console.log("Succesful.")
   }else{
     incorrect = 1;
+
     console.log("real: ", output[vec_size - 1], "ideal: ", vec_size * TUNING_CONFIG.alt)
     console.log("There was an incorrect value(s).")
   }
@@ -359,58 +359,63 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
 
 
 async function main() {
+  const WARMUPS = 2;
+  const RUNS = 5;
 
-  const ITERS = 2;
-  const WARM_UPS = 2;
-  
-  for (let i = 0; i < THREADS.length; i++) {
-    for (let j = 0; j < WORKGROUPS.length; j++) {
-      for (let k = 0; k < BATCH_SIZES.length; k++) {
-        let size = THREADS[i] * WORKGROUPS[j] * BATCH_SIZES[k] * PER_THREAD_SIZE;
-        if (size > 1 << 25) {
-          continue;
-        }
-        for (let l = 0; l < PAR_LOOKBACK.length; l++) {
-          let incorrect = 0;
-          let throughput = 0;
-          //console.log("vec_size: ", size)
-          for (let p = 1; p <= ITERS + WARM_UPS; p++) { // iters PLUS warmups to get warmups
-              if (p >= WARM_UPS) {
-                // througput, threads, workgroups, batch_size, par_lookback
-                //console.log("yomain")
-                const [t, inc] = await main_helper(THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], p);
-                //console.log("gurt")
-                throughput += t;
-                incorrect += inc;
-                
-              }else{
-                //console.log("yohelper")
-                await main_helper(THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], p)
-                //console.log("gurt")
-              }
+  for (const shader of SHADERS) {
+    for (let i = 10; i < 26; i++) {
+      VEC_SIZES[1 << i] = [];
+    }
+
+    for (let i = 0; i < THREADS.length; i++) {
+      for (let j = 0; j < WORKGROUPS.length; j++) {
+        for (let k = 0; k < BATCH_SIZES.length; k++) {
+          const size = THREADS[i] * WORKGROUPS[j] * BATCH_SIZES[k] * PER_THREAD_SIZE;
+          if (size > 1 << 25) {
+            continue;
           }
-          VEC_SIZES[size].push([throughput / (ITERS + 1), THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], incorrect])
+          for (let l = 0; l < PAR_LOOKBACK.length; l++) {
+            let best = -Infinity;
+            let incorrect = 0;
+
+            for (let r = 0; r < WARMUPS + RUNS; r++) {
+              const [t, inc] = await main_helper(
+                THREADS[i],
+                WORKGROUPS[j],
+                BATCH_SIZES[k],
+                PAR_LOOKBACK[l],
+                1,
+                shader.path
+              );
+              if (r >= WARMUPS) {
+                if (t > best) best = t;
+                incorrect += inc;
+              }
+            }
+            VEC_SIZES[size].push([best, THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], incorrect, shader.name]);
+          }
         }
       }
     }
-  }
-  
-  for (let i = 10; i < 26; i++) {
-    VEC_SIZES[1 << i].sort((a, b) => b[0] - a[0])
-    console.log("vec_Size: ", 1 << i)
-    console.log(VEC_SIZES[1 << i][0])
+
+    console.log(`\nBest results for ${shader.name}`);
+    for (let i = 10; i < 26; i++) {
+      VEC_SIZES[1 << i].sort((a, b) => b[0] - a[0]);
+      console.log("vec_size: ", 1 << i);
+      console.log(VEC_SIZES[1 << i][0]);
+    }
   }
 }
 
 
-async function main_helper(thx, wkrgx, btchsx, plbkx, p) {
+async function main_helper(thx, wkrgx, btchsx, plbkx, alt, shaderPath) {
 
   const TUNING_CONFIG = {
     workgroupSize: thx,
     numWorkgroups: wkrgx,
     batch_size: btchsx,
     par_lookback: plbkx,
-    alt: p,
+    alt: alt,
     debug_size: 2
   };
   
@@ -452,6 +457,11 @@ async function main_helper(thx, wkrgx, btchsx, plbkx, p) {
 // console.log("Is Fallback Adapter:", adapter.isFallbackAdapter);
 
   // Request the device from the adapter
+
+  if (!navigator.gpu.wgslLanguageFeatures.has("subgroup_id")) {
+    throw new Error(`WGSL subgroup_id and num_subgroups built-in values are not available`);
+  }
+
   const device = await adapter.requestDevice({
     requiredFeatures: requiredFeatures,
 });
@@ -482,7 +492,7 @@ async function main_helper(thx, wkrgx, btchsx, plbkx, p) {
   const bindGroupLayout = await initBindGroupLayout(device, TUNING_CONFIG);
   const buffers = await initBuffers(device, TUNING_CONFIG);
   const bindGroup = await initBindGroup(device, bindGroupLayout, TUNING_CONFIG, buffers);
-  const pipeline = await initComputePipeline(device, bindGroupLayout, TUNING_CONFIG);
+  const pipeline = await initComputePipeline(device, bindGroupLayout, TUNING_CONFIG, shaderPath);
   // Run the compute pass (dispatching the work to the GPU)
   let [throughput, incorrect] = await run(device, pipeline, bindGroup, TUNING_CONFIG, buffers);
   //console.log("tp: ", throughput, "inc: ", incorrect)
