@@ -1,20 +1,20 @@
 // WebGPU bindings in JavaScript
 let checkResults = false;
 
-// const THREADS = [32, 64, 128, 256];
-// const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
-// const BATCH_SIZES = [1, 2, 4];
-// const PAR_LOOKBACK = [1, 0];
+const THREADS = [32, 64, 128, 256];
+const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+const BATCH_SIZES = [1, 2, 4];
+const PAR_LOOKBACK = [1, 0];
 
 const SHADERS = [
-  { name: "prefix-sum-new", path: "prefix-sum-new.wgsl" },
-  //{ name: "prefix-sum-og", path: "prefix-sum-og.wgsl" },
+  { name: "prefix-sum with new changes", path: "prefix-sum-new.wgsl" },
+  { name: "prefix-sum from thesis", path: "prefix-sum-original.wgsl" },
 ];
 
 // const THREADS = [128]
-// const WORKGROUPS = [16384]
-// const BATCH_SIZES = [2]
-// const PAR_LOOKBACK = [0]
+// const WORKGROUPS = [2048]
+// const BATCH_SIZES = [4]
+// const PAR_LOOKBACK = [1]
 
 let VEC_SIZES = {
   [1 << 16]: [], [1 << 17]: [], [1 << 18]: [],
@@ -22,6 +22,10 @@ let VEC_SIZES = {
   [1 << 22]: [], [1 << 23]: [], [1 << 24]: [],
   [1 << 25]: []
 };
+
+const THEORETICAL_THROUGHPUT_GBPS = 672;
+const SHADER_COLORS = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd"];
+const PLOT_CANVAS_ID = "throughput-chart";
 
 
 
@@ -353,7 +357,197 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
       console.log(`output[${i - 1}]: ${output[i - 1]}`);
     }
   }
+
+  buffers.CReadBuffer.unmap();
+  buffers.debugReadBuffer.unmap();
+  buffers.TimestampReadBuffer.unmap();
+  querySet.destroy();
   return [throughput, incorrect];
+}
+
+function ensurePlotCanvas() {
+  let canvas = document.getElementById(PLOT_CANVAS_ID);
+  if (!canvas) {
+    const container = document.createElement("div");
+    container.style.maxWidth = "1000px";
+    container.style.marginTop = "16px";
+
+    const title = document.createElement("h2");
+    title.textContent = "Shader Throughput (RTX 5070)";
+
+    canvas = document.createElement("canvas");
+    canvas.id = PLOT_CANVAS_ID;
+    canvas.style.width = "100%";
+    canvas.style.height = "500px";
+    canvas.width = 1000;
+    canvas.height = 500;
+
+    const legend = document.createElement("div");
+    legend.id = "throughput-legend";
+    legend.style.fontFamily = "sans-serif";
+    legend.style.fontSize = "12px";
+    legend.style.marginTop = "6px";
+
+    container.appendChild(title);
+    container.appendChild(canvas);
+    container.appendChild(legend);
+
+    document.body.appendChild(container);
+  }
+  return canvas;
+}
+
+function updateLegend(resultsByShader) {
+  const legend = document.getElementById("throughput-legend");
+  if (!legend) return;
+  legend.innerHTML = "";
+
+  resultsByShader.forEach((shader, idx) => {
+    const item = document.createElement("span");
+    item.style.display = "inline-block";
+    item.style.marginRight = "12px";
+    item.style.color = SHADER_COLORS[idx % SHADER_COLORS.length];
+    item.textContent = shader.name;
+    legend.appendChild(item);
+  });
+
+  const line = document.createElement("span");
+  line.style.display = "inline-block";
+  line.style.marginLeft = "12px";
+  line.style.color = "#d62728";
+  line.textContent = `Theoretical limit (${THEORETICAL_THROUGHPUT_GBPS} GBPS)`;
+  legend.appendChild(line);
+}
+
+function drawPlot(resultsByShader) {
+  const canvas = ensurePlotCanvas();
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const logicalWidth = canvas.clientWidth || canvas.width;
+  const logicalHeight = canvas.clientHeight || canvas.height;
+  canvas.width = Math.floor(logicalWidth * dpr);
+  canvas.height = Math.floor(logicalHeight * dpr);
+  ctx.scale(dpr, dpr);
+
+  ctx.clearRect(0, 0, logicalWidth, logicalHeight);
+
+  const margin = { top: 30, right: 20, bottom: 60, left: 70 };
+  const plotWidth = logicalWidth - margin.left - margin.right;
+  const plotHeight = logicalHeight - margin.top - margin.bottom;
+
+  const sizeSet = new Set();
+  let maxThroughput = 0;
+  resultsByShader.forEach(shader => {
+    shader.data.forEach(point => {
+      sizeSet.add(point.size);
+      if (Number.isFinite(point.throughput)) {
+        if (point.throughput > maxThroughput) maxThroughput = point.throughput;
+      }
+    });
+  });
+  const sizes = Array.from(sizeSet).sort((a, b) => a - b);
+  if (sizes.length === 0) return;
+
+  const yMax = Math.max(THEORETICAL_THROUGHPUT_GBPS, maxThroughput) * 1.05;
+  const yMin = 0;
+
+  const xForIndex = (i) => {
+    if (sizes.length === 1) return margin.left + plotWidth / 2;
+    return margin.left + (i / (sizes.length - 1)) * plotWidth;
+  };
+  const yForValue = (v) => {
+    return margin.top + plotHeight - ((v - yMin) / (yMax - yMin)) * plotHeight;
+  };
+
+  // Axes
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(margin.left, margin.top);
+  ctx.lineTo(margin.left, margin.top + plotHeight);
+  ctx.lineTo(margin.left + plotWidth, margin.top + plotHeight);
+  ctx.stroke();
+
+  // Y ticks
+  ctx.font = "12px sans-serif";
+  ctx.fillStyle = "#333";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  const yTicks = 5;
+  for (let i = 0; i <= yTicks; i++) {
+    const v = (yMax / yTicks) * i;
+    const y = yForValue(v);
+    ctx.strokeStyle = "#e0e0e0";
+    ctx.beginPath();
+    ctx.moveTo(margin.left, y);
+    ctx.lineTo(margin.left + plotWidth, y);
+    ctx.stroke();
+    ctx.fillStyle = "#333";
+    ctx.fillText(v.toFixed(0), margin.left - 8, y);
+  }
+
+  // X labels
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  sizes.forEach((size, i) => {
+    const x = xForIndex(i);
+    const power = Math.log2(size);
+    const label = Number.isFinite(power) ? `2^${power}` : `${size}`;
+    ctx.fillText(label, x, margin.top + plotHeight + 8);
+  });
+
+  // Theoretical line
+  const yTheory = yForValue(THEORETICAL_THROUGHPUT_GBPS);
+  ctx.strokeStyle = "#d62728";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(margin.left, yTheory);
+  ctx.lineTo(margin.left + plotWidth, yTheory);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#d62728";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(`Theoretical ${THEORETICAL_THROUGHPUT_GBPS} GBPS`, margin.left + 4, yTheory - 2);
+
+  // Series
+  resultsByShader.forEach((shader, idx) => {
+    const color = SHADER_COLORS[idx % SHADER_COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    sizes.forEach((size, i) => {
+      const point = shader.data.find(p => p.size === size);
+      if (!point || !Number.isFinite(point.throughput)) return;
+      const x = xForIndex(i);
+      const y = yForValue(point.throughput);
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.stroke();
+
+    // Points
+    sizes.forEach((size, i) => {
+      const point = shader.data.find(p => p.size === size);
+      if (!point || !Number.isFinite(point.throughput)) return;
+      const x = xForIndex(i);
+      const y = yForValue(point.throughput);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  });
+
+  updateLegend(resultsByShader);
 }
 
 
@@ -361,6 +555,47 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
 async function main() {
   const WARMUPS = 2;
   const RUNS = 5;
+
+  // Check if WebGPU is available in the browser
+  if (!navigator.gpu) {
+    document.getElementById("webgpu-suppported").innerText = `WebGPU support: not supported`;
+    console.error("WebGPU not supported in this browser.");
+    return;
+  } else {
+    document.getElementById("webgpu-suppported").innerText = `WebGPU support: supported`;
+  }
+
+  if (!navigator.gpu.wgslLanguageFeatures.has("subgroup_id")) {
+    throw new Error(`WGSL subgroup_id and num_subgroups built-in values are not available`);
+  }
+
+  const requiredFeatures = ["timestamp-query", "subgroups"];
+
+  // Request a high-performance adapter and enable the required features
+  const adapter = await navigator.gpu.requestAdapter({
+    powerPreference: 'high-performance',
+  });
+
+  console.log(adapter)
+
+  if (!adapter) {
+    console.error("Failed to get a valid adapter.");
+    return;
+  }
+
+  const device = await adapter.requestDevice({
+    requiredFeatures: requiredFeatures,
+  });
+  device.lost.then(info => {
+    console.error("Device lost:", info.message);
+  });
+
+  // Dummy error callback for uncaptured WebGPU errors
+  device.onuncapturederror = (event) => {
+    console.error("Uncaptured error:", event.error);
+  };
+
+  const resultsByShader = [];
 
   for (const shader of SHADERS) {
     for (let i = 10; i < 26; i++) {
@@ -380,6 +615,7 @@ async function main() {
 
             for (let r = 0; r < WARMUPS + RUNS; r++) {
               const [t, inc] = await main_helper(
+                device,
                 THREADS[i],
                 WORKGROUPS[j],
                 BATCH_SIZES[k],
@@ -404,11 +640,23 @@ async function main() {
       console.log("vec_size: ", 1 << i);
       console.log(VEC_SIZES[1 << i][0]);
     }
+
+    const shaderResults = [];
+    for (let i = 10; i < 26; i++) {
+      const size = 1 << i;
+      const bestEntry = VEC_SIZES[size][0];
+      if (bestEntry && Number.isFinite(bestEntry[0])) {
+        shaderResults.push({ size, throughput: bestEntry[0] });
+      }
+    }
+    resultsByShader.push({ name: shader.name, data: shaderResults });
   }
+
+  drawPlot(resultsByShader);
 }
 
 
-async function main_helper(thx, wkrgx, btchsx, plbkx, alt, shaderPath) {
+async function main_helper(device, thx, wkrgx, btchsx, plbkx, alt, shaderPath) {
 
   const TUNING_CONFIG = {
     workgroupSize: thx,
@@ -419,76 +667,7 @@ async function main_helper(thx, wkrgx, btchsx, plbkx, alt, shaderPath) {
     debug_size: 2
   };
   
-  const requiredFeatures = ["timestamp-query", "subgroups"];
-
-  // Check if WebGPU is available in the browser
-  if (!navigator.gpu) {
-    document.getElementById("webgpu-suppported").innerText = `WebGPU support: not supported`;
-    console.error("WebGPU not supported in this browser.");
-    return;
-  }else{
-    document.getElementById("webgpu-suppported").innerText = `WebGPU support: supported`;
-  }
-
-  
-
-  // Request a high-performance adapter and enable the required features
-  const adapter = await navigator.gpu.requestAdapter({
-    powerPreference: 'high-performance',
-  });
-
-  if (!adapter) {
-    console.error("Failed to get a valid adapter.");
-    return;
-  }
-
-//   // Log adapter details
-//   console.log(`Adapter Name: ${adapter.name}`);
-//   console.log(`Adapter Vendor: ${adapter.vendor}`);
-//   console.log(`Adapter Description: ${adapter.description}`);
-
-
-//   console.log("Adapter Name:", adapter.name || "Unknown");
-// console.log("Adapter Vendor:", adapter.vendor || "Unknown");
-// console.log("Adapter Description:", adapter.description || "Unknown");
-
-// // Log other potentially useful information
-// console.log("Adapter Limits:", adapter.limits);
-// console.log("Is Fallback Adapter:", adapter.isFallbackAdapter);
-
-  // Request the device from the adapter
-
-  if (!navigator.gpu.wgslLanguageFeatures.has("subgroup_id")) {
-    throw new Error(`WGSL subgroup_id and num_subgroups built-in values are not available`);
-  }
-
-  const device = await adapter.requestDevice({
-    requiredFeatures: requiredFeatures,
-});
-  device.lost.then(info => {
-    console.error("Device lost:", info.message);
-  }); 
-
-  // // Check if 'timestamp-query' and 'subgroup' are supported
-  // if (adapter.features.has('timestamp-query')) {
-  //   console.log('Timestamp queries are supported');
-  // } else {
-  //   console.log('Timestamp queries are not supported on this device.');
-  // }
-
-  // if (adapter.features.has('subgroups')) {
-  //   console.log('Subgroup operations are supported');
-  // } else {
-  //   console.log('Subgroup operations are not supported on this device.');
-  // }
-
-  // Dummy error callback for uncaptured WebGPU errors
-  device.onuncapturederror = (event) => {
-    console.error("Uncaptured error:", event.error);
-  };
-
   // Initialize all WebGPU components
-  
   const bindGroupLayout = await initBindGroupLayout(device, TUNING_CONFIG);
   const buffers = await initBuffers(device, TUNING_CONFIG);
   const bindGroup = await initBindGroup(device, bindGroupLayout, TUNING_CONFIG, buffers);
@@ -496,6 +675,17 @@ async function main_helper(thx, wkrgx, btchsx, plbkx, alt, shaderPath) {
   // Run the compute pass (dispatching the work to the GPU)
   let [throughput, incorrect] = await run(device, pipeline, bindGroup, TUNING_CONFIG, buffers);
   //console.log("tp: ", throughput, "inc: ", incorrect)
+
+  buffers.ABuffer.destroy();
+  buffers.BBuffer.destroy();
+  buffers.CBuffer.destroy();
+  buffers.CReadBuffer.destroy();
+  buffers.DBuffer.destroy();
+  buffers.debugBuffer.destroy();
+  buffers.debugReadBuffer.destroy();
+  buffers.TimestampResolveBuffer.destroy();
+  buffers.TimestampReadBuffer.destroy();
+
   return [throughput, incorrect];
 }
 

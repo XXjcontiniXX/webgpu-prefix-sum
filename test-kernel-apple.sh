@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # Start Python HTTP server in background
-echo "Starting Python HTTP server on port 8000..."
-python3 -m http.server 8000 &
+echo "Starting Python HTTP server on port 8101..."
+python3 -m http.server 8101 &
 SERVER_PID=$!
 
 # Wait briefly to ensure the server starts
 sleep 1
 
-# Launch Google Chrome with specified flags
-echo "Launching Google Chrome to http://localhost:8000..."
-google-chrome \
-  --no-sandbox \
+# Launch Google Chrome Canary with WebGPU flags on macOS
+echo "Launching Google Chrome Canary to http://localhost:8101..."
+
+open -a "Google Chrome Canary" --args \
   --ignore-gpu-blocklist \
   --enable-gpu-rasterization \
   --disable-software-rasterizer \
@@ -19,4 +19,9 @@ google-chrome \
   --enable-unsafe-webgpu \
   --enable-features=WebGPU \
   --disable-dawn-features=timestamp_quantization \
-  http://localhost:8000
+  http://localhost:8101
+
+# Wait for Chrome to exit
+wait
+echo "Stopping Python HTTP server..."
+kill $SERVER_PID
