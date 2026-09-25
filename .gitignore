@@ -1,0 +1,18 @@
+# build output
+cuda/bench
+cuda/results/*.log
+
+# node
+node_modules/
+package-lock.json
+
+# editor / OS
+.vscode/
+.DS_Store
+
+# scratch notes
+claude.txt
+
+
+# personal, not part of the project
+CV.tex

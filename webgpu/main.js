@@ -1,31 +1,56 @@
 // WebGPU bindings in JavaScript
 let checkResults = false;
 
-const THREADS = [32, 64, 128, 256];
-const WORKGROUPS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
-const BATCH_SIZES = [1, 2, 4];
-const PAR_LOOKBACK = [1, 0];
+const params = new URLSearchParams(location.search);
+// Each tuning axis can be narrowed from the URL, e.g. ?threads=128&workgroups=2048
+// which is handy for a quick smoke test before committing to the full sweep.
+const list = (key, fallback) => {
+  const v = params.get(key);
+  return v ? v.split(",").map(Number) : fallback;
+};
 
-const SHADERS = [
-  { name: "prefix-sum with new changes", path: "prefix-sum-new.wgsl" },
-  { name: "prefix-sum from thesis", path: "prefix-sum-original.wgsl" },
+const THREADS = list("threads", [32, 64, 128, 256]);
+const WORKGROUPS = list("workgroups", [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]);
+const BATCH_SIZES = list("batch", [1, 2, 4]);
+const PAR_LOOKBACK = list("lookback", [1, 0]);
+
+const ALL_SHADERS = [
+  { key: "v2", name: "prefix-sum-v2", path: "prefix-sum-v2.wgsl" },
+  { key: "v1", name: "prefix-sum-v1", path: "prefix-sum-v1.wgsl" },
 ];
+// ?shaders=v2 picks a subset; default runs both.
+const SHADERS = (() => {
+  const want = params.get("shaders");
+  if (!want) return ALL_SHADERS;
+  const keys = want.split(",");
+  return keys.map(k => ALL_SHADERS.find(s => s.key === k)).filter(Boolean);
+})();
 
 // const THREADS = [128]
 // const WORKGROUPS = [2048]
 // const BATCH_SIZES = [4]
 // const PAR_LOOKBACK = [1]
 
-let VEC_SIZES = {
-  [1 << 16]: [], [1 << 17]: [], [1 << 18]: [],
-  [1 << 19]: [], [1 << 20]: [], [1 << 21]: [],
-  [1 << 22]: [], [1 << 23]: [], [1 << 24]: [],
-  [1 << 25]: []
-};
+// Input sizes swept by the benchmark, as powers of two (inclusive range).
+// 2^12 is the smallest size the tuning grid can produce (32 threads * 32 workgroups * 1 batch * 4),
+// 2^25 is the cap enforced in the sweep below.
+const MIN_POW = Number(params.get("minpow")) || 12;
+const MAX_POW = Number(params.get("maxpow")) || 25;
 
-const THEORETICAL_THROUGHPUT_GBPS = 672;
+let VEC_SIZES = {};
+
+// Peak memory bandwidth of the GPU under test, for the reference line on the plot.
+// Override per-machine with ?peak=<GB/s> (default is the RTX 5070's 672 GB/s).
+const THEORETICAL_THROUGHPUT_GBPS = Number(params.get("peak")) || 672;
+// Per-run wall-clock budget; a config that blows past it is recorded as failed
+// instead of wedging the whole sweep.
+const RUN_TIMEOUT_MS = Number(params.get("timeout")) || 120000;
+// ?verify=1 checks every output element instead of just the last one. Slow; use for
+// correctness runs, not for timing sweeps.
+const VERIFY_FULL = params.get("verify") === "1";
 const SHADER_COLORS = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd"];
 const PLOT_CANVAS_ID = "throughput-chart";
+let GPU_LABEL = params.get("gpu") || "GPU";
 
 
 
@@ -276,15 +301,17 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
   const queue = device.queue;
   //const { buffers.ABuffer, buffers.BBuffer, buffers.CBuffer, buffers.CReadBuffer, buffers.DBuffer, buffers.debugBuffer, buffers.debugReadBuffer, buffers.TimestampResolveBuffer, buffers.TimestampReadBuffer } = await initBuffers(device);
 
-  const A_host = Array(vec_size).fill(TUNING_CONFIG.alt);
-  const B_host = Array(TUNING_CONFIG.numWorkgroups).fill(0);
-  const D_host = [0];
-  const debug_host = [TUNING_CONFIG.par_lookback, 0];
+  // Typed arrays directly: at 2^25 elements the Array->Uint32Array conversion this
+  // replaced dominated wall-clock time (it never affected the timestamped GPU pass).
+  const A_host = new Uint32Array(vec_size).fill(TUNING_CONFIG.alt);
+  const B_host = new Uint32Array(TUNING_CONFIG.numWorkgroups);
+  const D_host = new Uint32Array([0]);
+  const debug_host = new Uint32Array([TUNING_CONFIG.par_lookback, 0]);
 
-  await queue.writeBuffer(buffers.ABuffer, 0, new Uint32Array(A_host));
-  await queue.writeBuffer(buffers.BBuffer, 0, new Uint32Array(B_host));
-  await queue.writeBuffer(buffers.DBuffer, 0, new Uint32Array(D_host));
-  await queue.writeBuffer(buffers.debugBuffer, 0, new Uint32Array(debug_host));
+  queue.writeBuffer(buffers.ABuffer, 0, A_host);
+  queue.writeBuffer(buffers.BBuffer, 0, B_host);
+  queue.writeBuffer(buffers.DBuffer, 0, D_host);
+  queue.writeBuffer(buffers.debugBuffer, 0, debug_host);
 
   const encoder = device.createCommandEncoder();
 
@@ -325,13 +352,19 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
   
   duration = Date.now() - start;
   let incorrect = 0;
-  if (output[vec_size - 1] == vec_size * TUNING_CONFIG.alt) {
-    console.log("Succesful.")
-  }else{
+  if (VERIFY_FULL) {
+    // Element-wise: the last element alone can hide interior errors that cancel out.
+    for (let i = 0; i < vec_size; i++) {
+      if (output[i] !== (i + 1) * TUNING_CONFIG.alt) {
+        incorrect = 1;
+        console.log(`MISMATCH at ${i}: got ${output[i]} want ${(i + 1) * TUNING_CONFIG.alt}`
+          + ` (wg=${TUNING_CONFIG.workgroupSize} ngroups=${TUNING_CONFIG.numWorkgroups}`
+          + ` batch=${TUNING_CONFIG.batch_size} plb=${TUNING_CONFIG.par_lookback})`);
+        break;
+      }
+    }
+  } else if (output[vec_size - 1] != vec_size * TUNING_CONFIG.alt) {
     incorrect = 1;
-
-    console.log("real: ", output[vec_size - 1], "ideal: ", vec_size * TUNING_CONFIG.alt)
-    console.log("There was an incorrect value(s).")
   }
 
   const time = timestampOutput[1] - timestampOutput[0];
@@ -345,10 +378,6 @@ async function run(device, pipeline, bindGroup, TUNING_CONFIG, buffers) {
 
   const throughput = gigabytesTransferred / timeInSeconds
 
-  //console.log("Date.now duration: ", duration, "ns?")
-  //console.log("Throughput: ", throughput.toFixed(5), " GBPS");
-  console.log("Throughput: ", throughput, " GBPS");
-  
   document.getElementById("throughput-display").innerText = `Throughput: ${throughput} GBPS`;
 
 
@@ -373,7 +402,7 @@ function ensurePlotCanvas() {
     container.style.marginTop = "16px";
 
     const title = document.createElement("h2");
-    title.textContent = "Shader Throughput (RTX 5070)";
+    title.textContent = `Shader Throughput (${GPU_LABEL})`;
 
     canvas = document.createElement("canvas");
     canvas.id = PLOT_CANVAS_ID;
@@ -553,8 +582,8 @@ function drawPlot(resultsByShader) {
 
 
 async function main() {
-  const WARMUPS = 2;
-  const RUNS = 5;
+  const WARMUPS = Number(params.get("warmups") ?? NaN) || 2;
+  const RUNS = Number(params.get("runs")) || 5;
 
   // Check if WebGPU is available in the browser
   if (!navigator.gpu) {
@@ -571,88 +600,220 @@ async function main() {
 
   const requiredFeatures = ["timestamp-query", "subgroups"];
 
-  // Request a high-performance adapter and enable the required features
-  const adapter = await navigator.gpu.requestAdapter({
-    powerPreference: 'high-performance',
-  });
-
-  console.log(adapter)
-
-  if (!adapter) {
-    console.error("Failed to get a valid adapter.");
-    return;
+  // A config whose decoupled-lookback spin never makes forward progress hangs the
+  // GPU and takes the device down with it. Re-acquire adapter and device so the
+  // sweep can skip that config and carry on instead of losing every later size.
+  let deviceLost = null;
+  let deviceEpoch = 0;
+  async function acquireDevice() {
+    deviceEpoch++;
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error("Failed to get a valid adapter.");
+    // Without requiredLimits a device gets WebGPU's defaults -- a 128 MiB storage
+    // binding, which caps the sweep at 2^25 u32 and keeps every size inside this
+    // card's L2. Ask for what the adapter actually supports so larger, genuinely
+    // DRAM-bound sizes are reachable.
+    const requiredLimits = {};
+    for (const k of ["maxBufferSize", "maxStorageBufferBindingSize",
+                     "maxComputeWorkgroupsPerDimension", "maxComputeInvocationsPerWorkgroup"]) {
+      if (adapter.limits[k] !== undefined) requiredLimits[k] = adapter.limits[k];
+    }
+    const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+    device.lost.then(info => {
+      deviceLost = info.message || "unknown";
+      console.error("Device lost:", info.message);
+    });
+    device.onuncapturederror = (event) => {
+      console.error("Uncaptured error:", event.error);
+    };
+    return { adapter, device };
   }
 
-  const device = await adapter.requestDevice({
-    requiredFeatures: requiredFeatures,
-  });
-  device.lost.then(info => {
-    console.error("Device lost:", info.message);
-  });
+  let { adapter, device } = await acquireDevice();
+  console.log(adapter);
 
-  // Dummy error callback for uncaptured WebGPU errors
-  device.onuncapturederror = (event) => {
-    console.error("Uncaptured error:", event.error);
+  const adapterInfo = adapter.info || {};
+  if (!params.get("gpu")) {
+    GPU_LABEL = [adapterInfo.vendor, adapterInfo.architecture].filter(Boolean).join(" ") || "GPU";
+  }
+  window.__BENCH_META__ = {
+    gpu: GPU_LABEL,
+    vendor: adapterInfo.vendor,
+    architecture: adapterInfo.architecture,
+    subgroupMinSize: adapterInfo.subgroupMinSize,
+    subgroupMaxSize: adapterInfo.subgroupMaxSize,
+    peakGBps: THEORETICAL_THROUGHPUT_GBPS,
+    warmups: WARMUPS,
+    runs: RUNS,
+    minPow: MIN_POW,
+    maxPow: MAX_POW,
   };
 
   const resultsByShader = [];
+  const allConfigs = [];
+  const failures = [];
+
+  // Count the configs up front so progress logging is meaningful.
+  const configs = [];
+  for (const workgroupSize of THREADS) {
+    for (const numWorkgroups of WORKGROUPS) {
+      for (const batch_size of BATCH_SIZES) {
+        const size = workgroupSize * numWorkgroups * batch_size * PER_THREAD_SIZE;
+        if (size < (1 << MIN_POW) || size > (1 << MAX_POW)) continue;
+        for (const par_lookback of PAR_LOOKBACK) {
+          configs.push({ size, workgroupSize, numWorkgroups, batch_size, par_lookback });
+        }
+      }
+    }
+  }
+  const totalConfigs = configs.length * SHADERS.length;
+  console.log(`PROGRESS total_configs=${totalConfigs} (${configs.length} per shader x ${SHADERS.length} shaders), ${WARMUPS} warmups + ${RUNS} timed runs each`);
+
+  let done = 0;
+  let recoveries = 0;
+  const MAX_RECOVERIES = Number(params.get("maxrecoveries")) || 40;
+
+  // After a device loss the replacement device sometimes serves large buffers out
+  // of system memory instead of VRAM, which reads as ~26 GB/s (about PCIe x16) and
+  // silently poisons every later measurement. Re-measure a fixed reference config
+  // after each recovery and reject the device if it comes back degraded.
+  const CANARY = { workgroupSize: 256, numWorkgroups: 1024, batch_size: 4, par_lookback: 1 };
+  const CANARY_FLOOR = 0.6;
+  let canaryBaseline = null;
+
+  async function canary() {
+    try {
+      const [t] = await withTimeout(
+        main_helper(device, CANARY.workgroupSize, CANARY.numWorkgroups, CANARY.batch_size,
+                    CANARY.par_lookback, 1, SHADERS[0].path),
+        RUN_TIMEOUT_MS);
+      return t;
+    } catch (e) { return null; }
+  }
+
+  // Bring the device back after a hang; returns false once we've given up.
+  async function recoverDevice(why) {
+    if (recoveries >= MAX_RECOVERIES) {
+      console.log(`RECOVER giving up after ${recoveries} device recoveries`);
+      return false;
+    }
+    recoveries++;
+    console.log(`RECOVER #${recoveries} recreating device (${why})`);
+    deviceLost = null;
+    ({ adapter, device } = await acquireDevice());
+
+    // Confirm the new device performs like the original before trusting its numbers.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const t = await canary();
+      if (canaryBaseline === null) { canaryBaseline = t; break; }
+      if (t !== null && t >= canaryBaseline * CANARY_FLOOR) {
+        console.log(`CANARY ok epoch=${deviceEpoch} ${t.toFixed(1)} GB/s (baseline ${canaryBaseline.toFixed(1)})`);
+        break;
+      }
+      console.log(`CANARY DEGRADED epoch=${deviceEpoch} ${t === null ? "failed" : t.toFixed(1) + " GB/s"} vs baseline ${canaryBaseline.toFixed(1)} — recreating device`);
+      deviceLost = null;
+      ({ adapter, device } = await acquireDevice());
+    }
+    return true;
+  }
+
+  // The first dispatch in a fresh page reliably loses the Dawn instance once in this
+  // headless setup, which would otherwise cost us whichever config happens to be
+  // first. Spend a throwaway dispatch absorbing it.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await canary(); } catch (e) { /* discarded */ }
+    if (!deviceLost) break;
+    console.log(`WARMUP absorbing startup device loss: ${deviceLost}`);
+    deviceLost = null;
+    ({ adapter, device } = await acquireDevice());
+  }
+
+  canaryBaseline = await canary();
+  console.log(`CANARY baseline ${canaryBaseline === null ? "unavailable" : canaryBaseline.toFixed(1) + " GB/s"}`);
 
   for (const shader of SHADERS) {
-    for (let i = 10; i < 26; i++) {
+    for (let i = MIN_POW; i <= MAX_POW; i++) {
       VEC_SIZES[1 << i] = [];
     }
 
-    for (let i = 0; i < THREADS.length; i++) {
-      for (let j = 0; j < WORKGROUPS.length; j++) {
-        for (let k = 0; k < BATCH_SIZES.length; k++) {
-          const size = THREADS[i] * WORKGROUPS[j] * BATCH_SIZES[k] * PER_THREAD_SIZE;
-          if (size > 1 << 25) {
-            continue;
-          }
-          for (let l = 0; l < PAR_LOOKBACK.length; l++) {
-            let best = -Infinity;
-            let incorrect = 0;
+    for (const cfg of configs) {
+      if (deviceLost && !(await recoverDevice(deviceLost))) break;
 
-            for (let r = 0; r < WARMUPS + RUNS; r++) {
-              const [t, inc] = await main_helper(
-                device,
-                THREADS[i],
-                WORKGROUPS[j],
-                BATCH_SIZES[k],
-                PAR_LOOKBACK[l],
-                1,
-                shader.path
-              );
-              if (r >= WARMUPS) {
-                if (t > best) best = t;
-                incorrect += inc;
-              }
-            }
-            VEC_SIZES[size].push([best, THREADS[i], WORKGROUPS[j], BATCH_SIZES[k], PAR_LOOKBACK[l], incorrect, shader.name]);
+      let best = -Infinity;
+      let bestCorrect = -Infinity;
+      let incorrect = 0;
+      let error = null;
+
+      for (let r = 0; r < WARMUPS + RUNS; r++) {
+        try {
+          const [t, inc] = await withTimeout(
+            main_helper(device, cfg.workgroupSize, cfg.numWorkgroups, cfg.batch_size, cfg.par_lookback, 1, shader.path),
+            RUN_TIMEOUT_MS
+          );
+          if (r >= WARMUPS) {
+            if (t > best) best = t;
+            if (inc === 0 && t > bestCorrect) bestCorrect = t;
+            incorrect += inc;
           }
+        } catch (e) {
+          error = String(e && e.message ? e.message : e);
+          break;
         }
+        if (deviceLost) { error = "device lost: " + deviceLost; break; }
+      }
+
+      done++;
+      if (error) {
+        failures.push({ shader: shader.name, ...cfg, error });
+        console.log(`PROGRESS ${done}/${totalConfigs} FAILED ${shader.name} size=2^${Math.log2(cfg.size)} wg=${cfg.workgroupSize} ngroups=${cfg.numWorkgroups} batch=${cfg.batch_size} plb=${cfg.par_lookback} :: ${error}`);
+        // A timed-out run usually means the GPU is still spinning on a wedged
+        // dispatch; drop the device so the next config starts clean.
+        if (!(await recoverDevice(error))) break;
+      } else {
+        VEC_SIZES[cfg.size].push([best, cfg.workgroupSize, cfg.numWorkgroups, cfg.batch_size, cfg.par_lookback, incorrect, shader.name]);
+        allConfigs.push({ shader: shader.name, ...cfg, best, bestCorrect: Number.isFinite(bestCorrect) ? bestCorrect : null, incorrect, epoch: deviceEpoch });
+        console.log(`PROGRESS ${done}/${totalConfigs} ${shader.name} size=2^${Math.log2(cfg.size)} wg=${cfg.workgroupSize} ngroups=${cfg.numWorkgroups} batch=${cfg.batch_size} plb=${cfg.par_lookback} best=${best.toFixed(2)} GB/s incorrect=${incorrect}/${RUNS}`);
       }
     }
 
     console.log(`\nBest results for ${shader.name}`);
-    for (let i = 10; i < 26; i++) {
-      VEC_SIZES[1 << i].sort((a, b) => b[0] - a[0]);
-      console.log("vec_size: ", 1 << i);
-      console.log(VEC_SIZES[1 << i][0]);
-    }
-
     const shaderResults = [];
-    for (let i = 10; i < 26; i++) {
+    for (let i = MIN_POW; i <= MAX_POW; i++) {
       const size = 1 << i;
+      VEC_SIZES[size].sort((a, b) => b[0] - a[0]);
       const bestEntry = VEC_SIZES[size][0];
+      console.log("vec_size: ", size, bestEntry);
+      // Best config that produced a correct scan on every timed run.
+      const bestCorrectEntry = VEC_SIZES[size].find(e => e[5] === 0);
       if (bestEntry && Number.isFinite(bestEntry[0])) {
-        shaderResults.push({ size, throughput: bestEntry[0] });
+        shaderResults.push({
+          size,
+          throughput: bestEntry[0],
+          config: { workgroupSize: bestEntry[1], numWorkgroups: bestEntry[2], batch_size: bestEntry[3], par_lookback: bestEntry[4] },
+          incorrect: bestEntry[5],
+          correctThroughput: bestCorrectEntry ? bestCorrectEntry[0] : null,
+          correctConfig: bestCorrectEntry
+            ? { workgroupSize: bestCorrectEntry[1], numWorkgroups: bestCorrectEntry[2], batch_size: bestCorrectEntry[3], par_lookback: bestCorrectEntry[4] }
+            : null,
+        });
       }
     }
     resultsByShader.push({ name: shader.name, data: shaderResults });
   }
 
   drawPlot(resultsByShader);
+
+  window.__BENCH_RESULTS__ = { meta: window.__BENCH_META__, resultsByShader, allConfigs, failures, recoveries, deviceEpochs: deviceEpoch, canaryBaseline };
+  window.__BENCH_DONE__ = true;
+  console.log("BENCHMARK_COMPLETE");
+}
+
+function withTimeout(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`run timed out after ${ms} ms`)), ms); }),
+  ]);
 }
 
 
@@ -690,4 +851,8 @@ async function main_helper(device, thx, wkrgx, btchsx, plbkx, alt, shaderPath) {
 }
 
 
-main();
+main().catch(err => {
+  window.__BENCH_ERROR__ = String(err && err.stack ? err.stack : err);
+  window.__BENCH_DONE__ = true;
+  console.error("BENCHMARK_FAILED", err);
+});

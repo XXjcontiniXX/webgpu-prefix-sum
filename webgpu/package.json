@@ -1,0 +1,12 @@
+{
+  "name": "prefix-sum-webgpu-bench",
+  "private": true,
+  "type": "module",
+  "description": "Headless driver for the WGSL prefix-sum benchmark",
+  "scripts": {
+    "bench": "node bench-headless.mjs results/run.json"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.9.0"
+  }
+}

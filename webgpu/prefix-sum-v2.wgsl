@@ -15,13 +15,21 @@ override wg_size: u32;
 
 var<workgroup> wg_broadcast: u32;
 var<workgroup> exclusive_prefix: u32;
-var<workgroup> inclusive_scan: u32;
+var<workgroup> workgroup_aggregate: u32;
 
 // size of min_subgroup_size * batch_size, every subgroup has batch_size
 
 // must change this to match with num_subgroups * BATCH_SIZE
-var<workgroup> scratch: array<u32, NUM_SUBGROUPS*BATCH_SIZE>;
+var<workgroup> scratch: array<u32, NUM_SUBGROUPS>;
 
+
+fn scan4(v: vec4<u32>) -> vec4<u32> {
+  var r = v;
+  r.y += r.x;
+  r.z += r.y;
+  r.w += r.z;
+  return r;
+}
 
 fn calc_lookback_id(
   subgroup_invocation_id: u32,  // Now passed as an argument
@@ -59,29 +67,28 @@ fn calc_lookback_id(
 
   let base = part_id * wg_size * BATCH_SIZE + subgroup_id * (subgroup_size * BATCH_SIZE);
 
-  let batch_groups = BATCH_SIZE * num_subgroups;
-
   var values: array<vec4<u32>, BATCH_SIZE>;
 
   //{VEC4-REDUCTION}
 
-var subgroup_carry: u32 = 0;
+  // Issue every load before consuming any of them, so the batch's memory latency
+  // overlaps instead of serialising behind each subgroup scan.
+  for (var i: u32 = 0; i < BATCH_SIZE; i++) {
+    values[i] = in[base + i * subgroup_size + subgroup_invocation_id];
+  }
+
+  var subgroup_carry: u32 = 0;
 
   for (var i: u32 = 0; i < BATCH_SIZE; i++) {
-    let idx = base + i * subgroup_size + subgroup_invocation_id;
-    values[i] = in[idx];
+    let v = scan4(values[i]);
+    let ex = subgroupExclusiveAdd(v.w);
+    values[i] = v + ex + subgroup_carry;
 
-    values[i].y += values[i].x;
-    values[i].z += values[i].y;
-    values[i].w += values[i].z;
-
-    let lane_sum = values[i].w;
-
-    let ex = subgroupExclusiveAdd(lane_sum);
-    values[i] += ex + subgroup_carry;
-
-    let total_i = subgroupBroadcast(ex + lane_sum, 32 - 1u);
-    subgroup_carry += total_i;
+    // subgroupBroadcast takes a constant lane index, so the subgroup width is
+    // hardcoded to 32 here. This kernel is NVIDIA-only for that reason; on wave64
+    // or 16-wide hardware use subgroupInclusiveAdd with
+    // subgroupShuffle(inc, subgroup_size - 1u) instead.
+    subgroup_carry += subgroupBroadcast(ex + v.w, 32 - 1u);
   }
 
   if (subgroup_invocation_id == subgroup_size - 1) {
@@ -90,19 +97,32 @@ var subgroup_carry: u32 = 0;
 
   workgroupBarrier();
 
+  // Scan the per-subgroup totals. The width is num_subgroups, NOT
+  // BATCH_SIZE * num_subgroups: only num_subgroups entries were written above.
+  // The last lane also publishes the inclusive total, because the exclusive scan
+  // alone drops the final subgroup's contribution.
   if (subgroup_id == 0) {
-    let valid = select(0u, scratch[subgroup_invocation_id], subgroup_invocation_id < batch_groups);
-    scratch[subgroup_invocation_id] = subgroupExclusiveAdd(valid);
+    let in_range = subgroup_invocation_id < num_subgroups;
+    // Clamp the index as well as masking the value, so no lane reads past
+    // scratch when robustness is disabled.
+    let valid = select(0u, scratch[select(0u, subgroup_invocation_id, in_range)], in_range);
+    let inc = subgroupInclusiveAdd(valid);
+    if (in_range) {
+      scratch[subgroup_invocation_id] = inc - valid;
+    }
+    if (subgroup_invocation_id == num_subgroups - 1u) {
+      workgroup_aggregate = inc;
+    }
   }
-  
+
   workgroupBarrier();
 
   if (thread_id == 0) { // This has to be this rather than get_local_id == 0 bcz exprfx mst be synced by subbarrier in lookback
 
-    atomicStore(&prefix_states[part_id], (FLG_A << ANTI_MASK) | (scratch[batch_groups - 1] & MASK_));
+    atomicStore(&prefix_states[part_id], (FLG_A << ANTI_MASK) | (workgroup_aggregate & MASK_));
 
     if (part_id == 0) {
-      atomicStore(&prefix_states[part_id], (FLG_P << ANTI_MASK) | (scratch[batch_groups - 1] & MASK_));
+      atomicStore(&prefix_states[part_id], (FLG_P << ANTI_MASK) | (workgroup_aggregate & MASK_));
     }
     exclusive_prefix = 0;
   }
@@ -154,7 +174,7 @@ var subgroup_carry: u32 = 0;
       // finally last thread in subgroup updates this workgroup's prefix/flag
       if (subgroup_invocation_id == subgroup_size - 1) {
         //debug[0] = i32(subgroup_id);
-        atomicStore(&prefix_states[part_id], (FLG_P << ANTI_MASK) | ((exclusive_prefix + scratch[batch_groups - 1]) & MASK_));
+        atomicStore(&prefix_states[part_id], (FLG_P << ANTI_MASK) | ((exclusive_prefix + workgroup_aggregate) & MASK_));
       }
       
     }
@@ -178,7 +198,7 @@ var subgroup_carry: u32 = 0;
           lookback_id -= 1;
         }
       }
-      atomicStore(&prefix_states[part_id], (FLG_P << ANTI_MASK) | ((exclusive_prefix + scratch[batch_groups - 1]) & MASK_));
+      atomicStore(&prefix_states[part_id], (FLG_P << ANTI_MASK) | ((exclusive_prefix + workgroup_aggregate) & MASK_));
     }
   }
 
